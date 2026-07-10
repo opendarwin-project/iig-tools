@@ -40,6 +40,13 @@ isScalarType(const std::string &t)
   while (!base.empty() && (base.back() == '*' || base.back() == ' '))
     base.pop_back();
   if (scalars.count(base)) return true;
+  /* OSObject-derived classes that collide with the enum-suffix heuristic
+   * below (e.g. "OSAction" ends in "Action" but is a reference type, not a
+   * scalar) */
+  static const std::set<std::string> objectExceptions = {
+    "OSAction", "OSObject",
+  };
+  if (objectExceptions.count(base)) return false;
   /* enums in the HID headers follow Type/Options suffix naming; treat common
    * integer-ish suffixes as scalar */
   for (const char *suf : { "Type", "Options", "Action" }) {
@@ -427,7 +434,7 @@ emitWrapper(const Class &c, const MethodInfo &mi, std::string &o)
   const Method &m = *mi.m;
   const Param *target = m.targetParam();
 
-  o += m.returnType == "void" ? "kern_return_t" : m.returnType;
+  o += (m.returnType == "void" && mi.oneway) ? "kern_return_t" : m.returnType;
   o += "\n" + c.name + "::" + m.name + "(\n";
   if (mi.oneway) o += "        IORPC rpc,\n";
   for (size_t i = 0; i < m.params.size(); i++) {
@@ -522,7 +529,8 @@ emitWrapper(const Class &c, const MethodInfo &mi, std::string &o)
   for (auto *p : mi.outStructs)
     o += "        if (" + p->name + ") *" + p->name + " = rpl->content." +
          p->name + ";\n";
-  o += "    }\n\n    return (ret);\n}\n\n";
+  o += "    }\n\n";
+  o += (m.returnType == "void") ? "    (void) ret;\n}\n\n" : "    return (ret);\n}\n\n";
 }
 
 static void
@@ -572,7 +580,8 @@ emitInvoke(const Class &c, const MethodInfo &mi, std::string &o)
            ") return (kIOReturnBadArgument);\n";
     }
 
-    o += "\n    " + std::string(mi.oneway ? "" : "ret = ") + "(*func)(";
+    bool funcReturnsVoid = !mi.oneway && m.returnType == "void";
+    o += "\n    " + std::string((mi.oneway || funcReturnsVoid) ? "" : "ret = ") + "(*func)(";
     if (!m.isStatic) o += "target,\n        ";
     for (size_t i = 0; i < m.params.size(); i++) {
       const Param &p = m.params[i];
@@ -600,6 +609,7 @@ emitInvoke(const Class &c, const MethodInfo &mi, std::string &o)
       o += "    return (kIOReturnSuccess);\n}\n\n";
       return;
     }
+    if (funcReturnsVoid) o += "    ret = kIOReturnSuccess;\n\n";
     o += "    if (kIOReturnSuccess != ret) return (ret);\n\n";
     o += "    rpc.reply->content.__hdr.msgid = " + mi.id() + ";\n";
     o += "    rpc.reply->content.__hdr.flags = kIORPCMessageOneway;\n";
