@@ -151,10 +151,24 @@ parseParam(const std::string &raw, Param &p, std::string &error)
   }
 
   auto toks = tokenize(s);
-  /* strip annotations */
+  /* strip annotations: TARGET (bare), TYPE (...) -- the latter takes a
+   * parenthesized argument (e.g. "OSAction *action TYPE (Cls::Method)") that
+   * must be consumed as a unit or its tokens get mistaken for the parameter
+   * name/type. */
   for (size_t i = 0; i < toks.size();) {
-    if (toks[i] == "TARGET") { p.isTarget = true; toks.erase(toks.begin() + i); }
-    else i++;
+    if (toks[i] == "TARGET") {
+      p.isTarget = true;
+      toks.erase(toks.begin() + i);
+    } else if (toks[i] == "TYPE" && i + 1 < toks.size() && toks[i + 1] == "(") {
+      size_t j = i + 1;
+      int depth = 0;
+      do {
+        if (toks[j] == "(") depth++;
+        else if (toks[j] == ")") depth--;
+        j++;
+      } while (j < toks.size() && depth > 0);
+      toks.erase(toks.begin() + i, toks.begin() + j);
+    } else i++;
   }
   if (toks.empty()) { error = "empty parameter: " + raw; return false; }
 
