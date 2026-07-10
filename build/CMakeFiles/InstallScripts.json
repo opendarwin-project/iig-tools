@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/vali/development/darwin/iig-tools/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,7 @@
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/iig.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/edit_cache.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/rebuild_cache.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/list_install_components.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/install.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/install/local.dir
+/home/vali/development/darwin/iig-tools/build/CMakeFiles/install/strip.dir

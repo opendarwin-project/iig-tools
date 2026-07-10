@@ -1,0 +1,20 @@
+[
+{
+  "directory": "/home/vali/development/darwin/iig-tools/build",
+  "command": "/usr/sbin/c++ -I/home/vali/development/darwin/iig-tools/include -std=gnu++17 -Wall -Wno-unused-function -o CMakeFiles/iig.dir/src/main.cpp.o -c /home/vali/development/darwin/iig-tools/src/main.cpp",
+  "file": "/home/vali/development/darwin/iig-tools/src/main.cpp",
+  "output": "/home/vali/development/darwin/iig-tools/build/CMakeFiles/iig.dir/src/main.cpp.o"
+},
+{
+  "directory": "/home/vali/development/darwin/iig-tools/build",
+  "command": "/usr/sbin/c++ -I/home/vali/development/darwin/iig-tools/include -std=gnu++17 -Wall -Wno-unused-function -o CMakeFiles/iig.dir/src/parse.cpp.o -c /home/vali/development/darwin/iig-tools/src/parse.cpp",
+  "file": "/home/vali/development/darwin/iig-tools/src/parse.cpp",
+  "output": "/home/vali/development/darwin/iig-tools/build/CMakeFiles/iig.dir/src/parse.cpp.o"
+},
+{
+  "directory": "/home/vali/development/darwin/iig-tools/build",
+  "command": "/usr/sbin/c++ -I/home/vali/development/darwin/iig-tools/include -std=gnu++17 -Wall -Wno-unused-function -o CMakeFiles/iig.dir/src/codegen.cpp.o -c /home/vali/development/darwin/iig-tools/src/codegen.cpp",
+  "file": "/home/vali/development/darwin/iig-tools/src/codegen.cpp",
+  "output": "/home/vali/development/darwin/iig-tools/build/CMakeFiles/iig.dir/src/codegen.cpp.o"
+}
+]
