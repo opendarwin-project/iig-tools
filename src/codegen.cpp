@@ -84,8 +84,13 @@ baseType(const std::string &t)
 }
 
 enum class ParamDir {
-  InScalar, InObject, InObjectArray, OutScalar, OutObject, OutStruct
+  InScalar, InObject, InObjectArray, OutScalar, OutObject, OutStruct,
+  InBoundedString,
 };
+
+/* Set once per File by generateHeader/generateImpl; single-threaded
+ * generation, one File processed at a time. */
+const std::map<std::string, int> *g_charArrayTypedefs = nullptr;
 
 ParamDir
 paramDir(const Param &p)
@@ -93,6 +98,11 @@ paramDir(const Param &p)
   int stars = starCount(p.type);
   bool isConst = p.type.compare(0, 6, "const ") == 0;
   if (p.arrayCount > 0) return ParamDir::InObjectArray;
+  if (stars == 0 && g_charArrayTypedefs) {
+    std::string base = isConst ? p.type.substr(6) : p.type;
+    auto it = g_charArrayTypedefs->find(base);
+    if (it != g_charArrayTypedefs->end()) return ParamDir::InBoundedString;
+  }
   if (stars == 0) return ParamDir::InScalar;
   if (stars >= 2) return ParamDir::OutObject;
   /* single star */
@@ -104,12 +114,21 @@ paramDir(const Param &p)
   return ParamDir::InObject; /* OSObject-derived by reference */
 }
 
+int
+boundedStringSize(const Param &p)
+{
+  bool isConst = p.type.compare(0, 6, "const ") == 0;
+  std::string base = isConst ? p.type.substr(6) : p.type;
+  auto it = g_charArrayTypedefs->find(base);
+  return it != g_charArrayTypedefs->end() ? it->second : 0;
+}
+
 struct MethodInfo {
   const Method *m;
   std::string cls;                 /* owning class name */
   std::vector<const Param *> inObjs, inObjArrays, outObjs, inScalars,
-      outScalars, outStructs;
-  bool oneway = false;             /* void TARGET-callback style */
+      outScalars, outStructs, inBoundedStrings;
+  bool oneway = false;             /* fire-and-forget: void logical return */
 
   MethodInfo(const Class &c, const Method &method) : m(&method), cls(c.name) {
     for (auto &p : method.params) {
@@ -120,9 +139,10 @@ struct MethodInfo {
       case ParamDir::OutScalar: outScalars.push_back(&p); break;
       case ParamDir::OutObject: outObjs.push_back(&p); break;
       case ParamDir::OutStruct: outStructs.push_back(&p); break;
+      case ParamDir::InBoundedString: inBoundedStrings.push_back(&p); break;
       }
     }
-    oneway = (method.returnType == "void") && method.targetParam();
+    oneway = (method.returnType == "void");
   }
 
   size_t msgDescriptors() const {
@@ -158,6 +178,19 @@ wantsRpc(const Method &m)
   return !m.isLocalOnly && !isPlainVirtualOverride(m);
 }
 
+/* KERNEL + TARGET together mark a raw callback signature (e.g.
+ * IOUserClient::KernelCompletion) invoked directly by hand-written kernel
+ * code via SimpleMemberFunctionCast, matched purely for its TYPE() so a
+ * CreateAction helper can reference its _ID -- no wrapper or Invoke is
+ * generated for it. Contrast with KERNEL alone (OSObject::SetDispatchQueue),
+ * which still gets a caller-side wrapper; only the Dispatch case is
+ * suppressed for those (see isKernelOnly use at the _Dispatch site). */
+bool
+wantsWrapper(const Method &m)
+{
+  return wantsRpc(m) && !(m.isKernelOnly && m.targetParam());
+}
+
 std::string
 hex(uint64_t v)
 {
@@ -170,9 +203,22 @@ hex(uint64_t v)
 std::string
 paramDecl(const Param &p)
 {
-  if (!p.type.empty() && (p.type.back() == '*' || p.type.back() == '&'))
-    return p.type + " " + p.name;
   return p.type + " " + p.name;
+}
+
+/* Same, but with bounded-string array typedefs (IODispatchQueueName etc.)
+ * decayed to "const char *" -- used for the actual method signature (both
+ * declaration and wrapper definition); the _Args macro keeps the raw
+ * typedef since it's only ever pasted into another declaration position
+ * where the decay happens implicitly anyway. */
+std::string
+paramDeclDecayed(const Param &p)
+{
+  if (paramDir(p) == ParamDir::InBoundedString) {
+    bool isConst = p.type.compare(0, 6, "const ") == 0;
+    return std::string(isConst ? "const char * " : "char * ") + p.name;
+  }
+  return paramDecl(p);
 }
 
 void
@@ -247,32 +293,35 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
       o += "    " + std::string(m.isStatic ? "static " : "") + m.returnType +
            "\\\n    " + m.name + "(\\\n";
       for (size_t i = 0; i < m.params.size(); i++) {
-        o += "        " + paramDecl(m.params[i]);
+        o += "        " + paramDeclDecayed(m.params[i]);
         if (i + 1 < m.params.size()) o += ",\\\n";
       }
       o += ");\\\n\\\n";
       continue;
     }
-    if (!wantsRpc(m) || m.isOverride || m.isPureVirtual) continue;
+    if (!wantsRpc(m) || m.isOverride) continue;
     /* wrapper declaration */
-    if (m.isStatic) {
-      o += "    static " + m.returnType + "\\\n    " + m.name + "(\\\n";
-      for (size_t i = 0; i < m.params.size(); i++) {
-        o += "        " + paramDecl(m.params[i]);
-        o += (i + 1 < m.params.size()) ? ",\\\n" : ");\\\n";
+    if (wantsWrapper(m)) {
+      if (m.isStatic) {
+        o += "    static " + m.returnType + "\\\n    " + m.name + "(\\\n";
+        for (size_t i = 0; i < m.params.size(); i++) {
+          o += "        " + paramDeclDecayed(m.params[i]);
+          o += (i + 1 < m.params.size()) ? ",\\\n" : ");\\\n";
+        }
+        if (m.params.empty()) o += ");\\\n";
+        o += "\\\n";
+      } else {
+        o += "    " + (m.returnType == "void" && mi.oneway ? std::string("kern_return_t")
+                                                            : m.returnType) +
+             "\\\n    " + m.name + "(\\\n";
+        if (mi.oneway) o += "        IORPC rpc,\\\n";
+        for (auto &p : m.params)
+          o += "        " + paramDeclDecayed(p) + ",\\\n";
+        o += "        OSDispatchMethod supermethod = NULL);\\\n\\\n";
       }
-      if (m.params.empty()) o += ");\\\n";
-      o += "\\\n";
-    } else {
-      o += "    " + (m.returnType == "void" && mi.oneway ? std::string("kern_return_t")
-                                                          : m.returnType) +
-           "\\\n    " + m.name + "(\\\n";
-      if (mi.oneway) o += "        IORPC rpc,\\\n";
-      for (auto &p : m.params)
-        o += "        " + paramDecl(p) + ",\\\n";
-      o += "        OSDispatchMethod supermethod = NULL);\\\n\\\n";
     }
-    /* CreateAction helper for TYPE methods */
+    /* CreateAction helper for TYPE methods -- needs only this method's _ID
+     * (always emitted above), not its wrapper/Invoke */
     if (!m.actionType.empty()) {
       o += "    kern_return_t\\\n    CreateAction" + m.name +
            "(size_t referenceSize, OSAction ** action);\\\n\\\n";
@@ -283,7 +332,7 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
   o += "\\\nprotected:\\\n    /* _Impl methods */\\\n\\\n";
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || !m.isLocal || m.isPureVirtual) continue;
+    if (!wantsRpc(m) || !m.isLocal) continue;
     o += "    " + std::string(m.isStatic ? "static " : "") + m.returnType +
          "\\\n    " + m.name + "_Impl(" + mi.args() + ");\\\n\\\n";
   }
@@ -292,7 +341,7 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
   o += "\\\npublic:\\\n    /* _Invoke methods */\\\n\\\n";
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || m.isOverride || m.isPureVirtual) continue;
+    if (!wantsWrapper(m) || m.isOverride) continue;
     std::string handlerArgs = m.isStatic ? mi.args()
         : ("OSMetaClassBase * target, " + mi.args());
     o += "    typedef " + m.returnType + " (*" + m.name + "_Handler)(" +
@@ -317,7 +366,7 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
   o += "#define " + c.name + "_KernelMethods \\\n\\\nprotected:\\\n    /* _Impl methods */\\\n\\\n";
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || m.isLocal || m.isOverride || m.isPureVirtual) continue;
+    if (!wantsRpc(m) || m.isLocal || m.isOverride) continue;
     o += "    " + std::string(m.isStatic ? "static " : "") + m.returnType +
          "\\\n    " + m.name + "_Impl(" + mi.args() + ");\\\n\\\n";
   }
@@ -330,7 +379,7 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
     if (!isPlainVirtualOverride(m)) continue;
     o += "    virtual " + m.returnType + "\\\n    " + m.name + "(\\\n";
     for (size_t i = 0; i < m.params.size(); i++) {
-      o += "        " + paramDecl(m.params[i]);
+      o += "        " + paramDeclDecayed(m.params[i]);
       o += (i + 1 < m.params.size()) ? ",\\\n" : "";
     }
     o += ") APPLE_KEXT_OVERRIDE;\\\n\\\n";
@@ -357,7 +406,8 @@ emitClassHeader(const File &f, const Class &c, std::string &o)
 void
 generateHeader(const File &f, std::string &o)
 {
-  o += "/* iig-lite generated from " + f.basename + " -- kernel-side subset;"
+  g_charArrayTypedefs = &f.charArrayTypedefs;
+  o += "/* iig-lite generated from " + f.basename + " - kernel-side subset;"
        " msgids are NOT Apple-ABI */\n\n";
   for (auto &ch : f.chunks) {
     if (ch.kind == Chunk::Text) {
@@ -395,6 +445,14 @@ emitMsgStructs(const MethodInfo &mi, std::string &o)
     o += "    OSObjectRef __" + p->name + "[" + std::to_string(p->arrayCount) + "];\n";
   for (auto *p : mi.inScalars)
     o += "    " + p->type + "  " + p->name + ";\n";
+  for (auto *p : mi.inBoundedStrings) {
+    int n = boundedStringSize(*p);
+    o += "    const char *  " + p->name + ";\n"
+         "#if !defined(__LP64__)\n"
+         "    uint32_t __" + p->name + "Pad;\n"
+         "#endif /* !defined(__LP64__) */\n"
+         "    char __" + p->name + "[" + std::to_string(n) + "];\n";
+  }
   o += "};\n#pragma pack(4)\nstruct " + mi.msg() + "\n{\n    IORPCMessageMach           mach;\n";
   o += "    mach_msg_port_descriptor_t __object__descriptor;\n";
   for (auto *p : mi.inObjs)
@@ -438,7 +496,7 @@ emitWrapper(const Class &c, const MethodInfo &mi, std::string &o)
   o += "\n" + c.name + "::" + m.name + "(\n";
   if (mi.oneway) o += "        IORPC rpc,\n";
   for (size_t i = 0; i < m.params.size(); i++) {
-    o += "        " + paramDecl(m.params[i]);
+    o += "        " + paramDeclDecayed(m.params[i]);
     bool more = (i + 1 < m.params.size()) || !m.isStatic;
     o += more ? ",\n" : ")\n";
   }
@@ -492,6 +550,11 @@ emitWrapper(const Class &c, const MethodInfo &mi, std::string &o)
   }
   for (auto *p : mi.inScalars)
     o += "    msg->content." + p->name + " = " + p->name + ";\n\n";
+  for (auto *p : mi.inBoundedStrings) {
+    o += "    msg->content." + p->name + " = NULL;\n\n";
+    o += "    strlcpy(&msg->content.__" + p->name + "[0], " + p->name +
+         ", sizeof(msg->content.__" + p->name + "));\n\n";
+  }
 
   if (mi.oneway) {
     o += "\n    ret = kIOReturnSuccess;\n\n    return (ret);\n}\n\n";
@@ -579,6 +642,12 @@ emitInvoke(const Class &c, const MethodInfo &mi, std::string &o)
       o += "    if (!" + p->name + " && rpc.message->content." + p->name +
            ") return (kIOReturnBadArgument);\n";
     }
+    for (auto *p : mi.inBoundedStrings) {
+      o += "    if (strnlen(&rpc.message->content.__" + p->name + "[0], "
+           "sizeof(rpc.message->content.__" + p->name + ")) >= "
+           "sizeof(rpc.message->content.__" + p->name +
+           ")) return kIOReturnBadArgument;\n";
+    }
 
     bool funcReturnsVoid = !mi.oneway && m.returnType == "void";
     o += "\n    " + std::string((mi.oneway || funcReturnsVoid) ? "" : "ret = ") + "(*func)(";
@@ -599,6 +668,9 @@ emitInvoke(const Class &c, const MethodInfo &mi, std::string &o)
         break;
       case ParamDir::OutObject:
         o += "(" + p.type + ")&rpc.reply->content." + p.name;
+        break;
+      case ParamDir::InBoundedString:
+        o += "&rpc.message->content.__" + p.name + "[0]";
         break;
       }
       if (i + 1 < m.params.size()) o += ",\n        ";
@@ -643,11 +715,16 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
 
   /* Msg/Rpl structs */
   for (auto &mi : infos) {
-    if (!wantsRpc(*mi.m) || mi.m->isOverride || mi.m->isPureVirtual) continue;
+    if (!wantsRpc(*mi.m) || mi.m->isOverride) continue;
     emitMsgStructs(mi, o);
   }
 
-  /* Dispatch */
+  /* Dispatch: skipped entirely for root classes with no superclass
+   * (OSMetaClassBase) -- iig only generates RPC scaffolding for classes that
+   * actually override Dispatch, and a class with no super has nothing valid
+   * to fall back to. */
+  if (c.superName.empty()) return;
+
   o += "kern_return_t\n" + c.name + "::Dispatch(const IORPC rpc)\n{\n"
        "    return _Dispatch(this, rpc);\n}\n\n";
   o += "kern_return_t\n" + c.name + "::_Dispatch(" + c.name +
@@ -657,8 +734,13 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
        "    switch (msg->msgid)\n    {\n";
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || m.isOverride || m.isPureVirtual) continue;
-    if (m.isStatic || m.isLocal) continue; /* statics: MetaClass; LOCAL: user side */
+    if (!wantsRpc(m) || m.isOverride) continue;
+    /* statics dispatch via MetaClass; KERNEL-only methods are always
+     * kernel-initiated (kernel never receives them). LOCAL only affects
+     * where _Impl is declared (KernelMethods vs generic Methods), not
+     * whether a Dispatch case exists -- LOCAL methods DO get dispatched
+     * (e.g. OSAction::Aborted, IOService::Start/Stop). */
+    if (m.isStatic || m.isKernelOnly) continue;
     o += "#if KERNEL\n";
     o += "        case " + mi.id() + ":\n        {\n";
     o += "            ret = " + c.name + "::" + m.name + "_Invoke(rpc, self, "
@@ -667,12 +749,13 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
     o += "#endif /* !KERNEL */\n";
   }
   o += "\n        default:\n";
-  if (!c.superName.empty() && c.superName != "OSObject")
-    o += "            ret = " + c.superName + "::_Dispatch(self, rpc);\n";
-  else if (c.superName == "OSObject")
-    o += "            ret = OSObject::_Dispatch(self, rpc);\n";
+  /* OSMetaClassBase is the hierarchy root: hand-written elsewhere in the
+   * kernel (see IOUserServer.cpp's OSMetaClassBase::Invoke/Dispatch), not
+   * iig-generated -- it has no _Dispatch, only the instance Dispatch. */
+  if (c.superName == "OSMetaClassBase")
+    o += "            ret = self->OSMetaClassBase::Dispatch(rpc);\n";
   else
-    o += "            ret = OSMetaClassBase::Dispatch(rpc);\n";
+    o += "            ret = " + c.superName + "::_Dispatch(self, rpc);\n";
   o += "            break;\n    }\n\n    return (ret);\n}\n\n";
 
   /* MetaClass::Dispatch (kernel side only; the !KERNEL metaclass is not
@@ -684,7 +767,7 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
        "    switch (msg->msgid)\n    {\n";
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || m.isOverride || m.isPureVirtual) continue;
+    if (!wantsRpc(m) || m.isOverride) continue;
     if (!m.isStatic || m.isLocal) continue;
     o += "        case " + mi.id() + ":\n";
     o += "            ret = " + c.name + "::" + m.name + "_Invoke(rpc, &" +
@@ -696,8 +779,9 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
   /* wrappers, CreateAction helpers, Invokes */
   for (auto &mi : infos) {
     const Method &m = *mi.m;
-    if (!wantsRpc(m) || m.isOverride || m.isPureVirtual) continue;
-    emitWrapper(c, mi, o);
+    if (!wantsRpc(m) || m.isOverride) continue;
+    bool wrapper = wantsWrapper(m);
+    if (wrapper) emitWrapper(c, mi, o);
     if (!m.actionType.empty()) {
       /* TYPE(Cls::Method) -- action creator */
       std::string t = m.actionType; /* "IOHIDDevice::CompleteReport" */
@@ -710,18 +794,19 @@ emitClassImpl(const File &f, const Class &c, std::string &o)
            "    return OSAction::Create(this, " + mi.id() + ", " + typeId +
            ", referenceSize, action);\n}\n\n";
     }
-    emitInvoke(c, mi, o);
+    if (wrapper) emitInvoke(c, mi, o);
   }
 }
 
 void
 generateImpl(const File &f, std::string &o)
 {
+  g_charArrayTypedefs = &f.charArrayTypedefs;
   std::string stem = f.basename;
   size_t dot = stem.rfind('.');
   if (dot != std::string::npos) stem = stem.substr(0, dot);
 
-  o += "/* iig-lite generated from " + f.basename + " -- kernel-side subset;"
+  o += "/* iig-lite generated from " + f.basename + " - kernel-side subset;"
        " msgids are NOT Apple-ABI */\n\n";
   o += "#undef IIG_IMPLEMENTATION\n#define IIG_IMPLEMENTATION \t" + f.basename + "\n\n";
   o += "#if KERNEL\n#include <libkern/c++/OSString.h>\n#else\n"

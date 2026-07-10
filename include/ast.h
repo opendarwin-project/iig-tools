@@ -17,6 +17,7 @@
 #define IIG_AST_H
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,10 @@ struct File {
    * (e.g. extra #includes), emitted into the .iig.cpp, not the header */
   std::string implText;
   std::string frameworkName; /* --framework-name; "" = include by quotes */
+  /* "typedef char Foo[N];" declarations seen in this file, e.g.
+   * IODispatchQueueName[256] -- parameters of these types get bounded-string
+   * marshaling (embedded fixed buffer + strlcpy/strnlen), not scalar copy. */
+  std::map<std::string, int> charArrayTypedefs;
 };
 
 bool parseIigFile(const std::string &path, const std::string &text, File &out,

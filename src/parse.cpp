@@ -257,7 +257,7 @@ parseMethod(const std::string &decl, Method &m, std::string &error)
     const std::string &t = tailToks[i];
     if (t == "LOCAL") m.isLocal = true;
     else if (t == "LOCALONLY") m.isLocalOnly = true;
-    else if (t == "KERNELONLY") m.isKernelOnly = true;
+    else if (t == "KERNELONLY" || t == "KERNEL") m.isKernelOnly = true;
     else if (t == "override") m.isOverride = true;
     else if (t == "TYPE" || t == "QUEUENAME") {
       /* consume "( tokens )" */
@@ -293,6 +293,25 @@ parseIigFile(const std::string &path, const std::string &text, File &out,
   out.path = path;
   size_t slash = path.find_last_of('/');
   out.basename = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+  /* "typedef char Name[N];" -- bounded-string typedefs used for name-style
+   * parameters (IODispatchQueueName, IOServiceName, ...). Scanned over the
+   * raw text since these are simple top-level declarations, not classes. */
+  {
+    std::string clean0 = blankComments(text);
+    size_t p = 0;
+    while ((p = clean0.find("typedef", p)) != std::string::npos) {
+      size_t semi = clean0.find(';', p);
+      if (semi == std::string::npos) break;
+      auto toks = tokenize(clean0.substr(p, semi - p));
+      /* toks: typedef char Name [ N ] */
+      if (toks.size() >= 6 && toks[0] == "typedef" && toks[1] == "char" &&
+          toks[3] == "[" && toks[5] == "]") {
+        out.charArrayTypedefs[toks[2]] = atoi(toks[4].c_str());
+      }
+      p = semi + 1;
+    }
+  }
 
   /* pull out "@iig implementation" ... "@iig end" regions: their content is
    * impl-only (extra includes); blank them in the header text (newlines kept
