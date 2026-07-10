@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <map>
 
 namespace iig {
 
@@ -159,6 +160,12 @@ parseParam(const std::string &raw, Param &p, std::string &error)
     if (toks[i] == "TARGET") {
       p.isTarget = true;
       toks.erase(toks.begin() + i);
+    } else if (toks[i] == "PORTMAKESEND") {
+      p.portDisposition = "MACH_MSG_TYPE_MAKE_SEND";
+      toks.erase(toks.begin() + i);
+    } else if (toks[i] == "PORTCOPYSEND") {
+      p.portDisposition = "MACH_MSG_TYPE_COPY_SEND";
+      toks.erase(toks.begin() + i);
     } else if (toks[i] == "TYPE" && i + 1 < toks.size() && toks[i + 1] == "(") {
       size_t j = i + 1;
       int depth = 0;
@@ -258,6 +265,7 @@ parseMethod(const std::string &decl, Method &m, std::string &error)
     if (t == "LOCAL") m.isLocal = true;
     else if (t == "LOCALONLY") m.isLocalOnly = true;
     else if (t == "KERNELONLY" || t == "KERNEL") m.isKernelOnly = true;
+    else if (t == "INVOKEREPLY") m.isInvokeReply = true;
     else if (t == "override") m.isOverride = true;
     else if (t == "TYPE" || t == "QUEUENAME") {
       /* consume "( tokens )" */
@@ -294,9 +302,27 @@ parseIigFile(const std::string &path, const std::string &text, File &out,
   size_t slash = path.find_last_of('/');
   out.basename = (slash == std::string::npos) ? path : path.substr(slash + 1);
 
-  /* "typedef char Name[N];" -- bounded-string typedefs used for name-style
-   * parameters (IODispatchQueueName, IOServiceName, ...). Scanned over the
-   * raw text since these are simple top-level declarations, not classes. */
+  /* Seed typedefs that are declared in commonly included .iig files. This
+   * generator processes one file at a time, so local scanning alone loses
+   * inherited ABI shapes such as IODispatchQueueName. */
+  out.charArrayTypedefs["IODispatchQueueName"] = 256;
+  out.charArrayTypedefs["IOServiceName"] = 128;
+  out.charArrayTypedefs["IOPropertyName"] = 128;
+  out.charArrayTypedefs["IORegistryPlaneName"] = 128;
+  out.arrayTypedefs["IODispatchQueueName"] = { "char", 256 };
+  out.arrayTypedefs["IOServiceName"] = { "char", 128 };
+  out.arrayTypedefs["IOPropertyName"] = { "char", 128 };
+  out.arrayTypedefs["IORegistryPlaneName"] = { "char", 128 };
+  out.enumConstants["kIOUserClientScalarArrayCountMax"] = 16;
+  out.enumConstants["kIOUserClientAsyncReferenceCountMax"] = 16;
+  out.enumConstants["kIOUserClientAsyncArgumentsCountMax"] = 16;
+  out.arrayTypedefs["IOUserClientScalarArray"] = { "uint64_t", 16 };
+  out.arrayTypedefs["IOUserClientAsyncReferenceArray"] = { "uint64_t", 16 };
+  out.arrayTypedefs["IOUserClientAsyncArgumentsArray"] = { "uint64_t", 16 };
+
+  /* Fixed-array typedefs used for bounded strings and inline POD buffers.
+   * Scanned over raw text since these are simple top-level declarations, not
+   * classes. */
   {
     std::string clean0 = blankComments(text);
     size_t p = 0;
@@ -304,10 +330,15 @@ parseIigFile(const std::string &path, const std::string &text, File &out,
       size_t semi = clean0.find(';', p);
       if (semi == std::string::npos) break;
       auto toks = tokenize(clean0.substr(p, semi - p));
-      /* toks: typedef char Name [ N ] */
-      if (toks.size() >= 6 && toks[0] == "typedef" && toks[1] == "char" &&
+      if (toks.size() >= 6 && toks[0] == "typedef" &&
           toks[3] == "[" && toks[5] == "]") {
-        out.charArrayTypedefs[toks[2]] = atoi(toks[4].c_str());
+        int count = atoi(toks[4].c_str());
+        auto it = out.enumConstants.find(toks[4]);
+        if (!count && it != out.enumConstants.end()) count = it->second;
+        if (count > 0) {
+          out.arrayTypedefs[toks[2]] = { toks[1], count };
+          if (toks[1] == "char") out.charArrayTypedefs[toks[2]] = count;
+        }
       }
       p = semi + 1;
     }
@@ -404,8 +435,40 @@ parseIigFile(const std::string &path, const std::string &text, File &out,
       if (hi < headToks.size()) cls.superName = headToks[hi];
     }
 
-    /* body: declarations separated by ';' */
+    /* body: declarations separated by ';'. Preprocessor conditionals inside
+     * a class body (e.g. "#if DRIVERKIT_PRIVATE" gating OSAction::Create)
+     * are blanked out here - iig-lite does not track conditional guards,
+     * so gated declarations are always emitted (matches the vendored xnu
+     * corpus, which was generated with DRIVERKIT_PRIVATE defined: Create
+     * and SetDispatchQueue/etc. appear unconditionally in it too). Left
+     * unblanked, a directive line glues onto the next declaration's first
+     * token stream and corrupts it (no ';' separates them). */
     std::string body = clean.substr(brace + 1, (end - 1) - (brace + 1));
+    {
+      size_t i = 0;
+      while (i < body.size()) {
+        if (body[i] == '\n') {
+          size_t j = i + 1;
+          while (j < body.size() && isspace((unsigned char)body[j]) && body[j] != '\n') j++;
+          if (j < body.size() && body[j] == '#') {
+            size_t lineEnd = body.find('\n', j);
+            if (lineEnd == std::string::npos) lineEnd = body.size();
+            for (size_t k = j; k < lineEnd; k++) body[k] = ' ';
+            i = lineEnd;
+            continue;
+          }
+        }
+        i++;
+      }
+      /* directive on the body's very first line (no leading '\n') */
+      size_t j = 0;
+      while (j < body.size() && isspace((unsigned char)body[j]) && body[j] != '\n') j++;
+      if (j < body.size() && body[j] == '#') {
+        size_t lineEnd = body.find('\n', j);
+        if (lineEnd == std::string::npos) lineEnd = body.size();
+        for (size_t k = j; k < lineEnd; k++) body[k] = ' ';
+      }
+    }
     for (auto &decl : splitTopLevel(body, ';')) {
       std::string d = trim(decl);
       /* strip access labels prefixed to a declaration */

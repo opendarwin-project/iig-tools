@@ -1,17 +1,17 @@
 /*
- * ast.h -- parsed representation of a .iig file.
+ * ast.h - parsed representation of a .iig file.
  *
  * The .iig dialect is C++ class declarations plus direction annotations:
  *   class [NATIVE] [KERNEL] Foo : public Super { ... };
  *   class EXTENDS (Foo) FooPrivate { ... };   // merges into Foo
  * Method annotations:
- *   (none)    -- RPC method implemented in the kernel (for KERNEL classes);
+ *   (none)    - RPC method implemented in the kernel (for KERNEL classes);
  *                callers get a marshaling wrapper, kernel supplies Name_Impl.
- *   LOCAL     -- implemented by the user-space driver; kernel calls out.
- *   LOCALONLY -- no RPC at all; hand-implemented on both sides.
- *   TYPE(Cls::Method) -- method is an OSAction callback of that type.
- *   TARGET    -- parameter annotation: the OSAction that carries the target.
- *   QUEUENAME(name) -- dispatch queue hint (parsed, unused by codegen).
+ *   LOCAL     - implemented by the user-space driver; kernel calls out.
+ *   LOCALONLY - no RPC at all; hand-implemented on both sides.
+ *   TYPE(Cls::Method) - method is an OSAction callback of that type.
+ *   TARGET    - parameter annotation: the OSAction that carries the target.
+ *   QUEUENAME(name) - dispatch queue hint (parsed, unused by codegen).
  */
 #ifndef IIG_AST_H
 #define IIG_AST_H
@@ -29,6 +29,7 @@ struct Param {
   std::string defaultValue; /* without '=', empty if none */
   bool isTarget = false;    /* TARGET annotation */
   int arrayCount = 0;       /* "T * const foo[32]" -> 32; 0 = not an array */
+  std::string portDisposition; /* MACH_MSG_TYPE_* for PORTMAKESEND/COPYSEND */
 };
 
 struct Method {
@@ -42,6 +43,7 @@ struct Method {
   bool isLocal = false;      /* LOCAL */
   bool isLocalOnly = false;  /* LOCALONLY */
   bool isKernelOnly = false; /* KERNELONLY */
+  bool isInvokeReply = false; /* INVOKEREPLY */
   std::string actionType;    /* TYPE(x) argument, empty if none */
   std::string queueName;     /* QUEUENAME(x) argument */
   bool fromExtends = false;  /* declared in the EXTENDS private class */
@@ -70,6 +72,11 @@ struct Chunk {
   size_t classIndex = 0;    /* into File::classes when kind == ClassDecl */
 };
 
+struct ArrayTypedef {
+  std::string elementType;
+  int count = 0;
+};
+
 struct File {
   std::string path;         /* input path as given */
   std::string basename;     /* "IOHIDDevice.iig" */
@@ -83,6 +90,8 @@ struct File {
    * IODispatchQueueName[256] -- parameters of these types get bounded-string
    * marshaling (embedded fixed buffer + strlcpy/strnlen), not scalar copy. */
   std::map<std::string, int> charArrayTypedefs;
+  std::map<std::string, ArrayTypedef> arrayTypedefs;
+  std::map<std::string, int> enumConstants;
 };
 
 bool parseIigFile(const std::string &path, const std::string &text, File &out,
