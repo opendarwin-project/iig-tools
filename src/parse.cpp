@@ -152,7 +152,7 @@ parseParam(const std::string &raw, Param &p, std::string &error)
   }
 
   auto toks = tokenize(s);
-  /* strip annotations: TARGET (bare), TYPE (...) -- the latter takes a
+  /* strip annotations: TARGET (bare), TYPE (...), the latter takes a
    * parenthesized argument (e.g. "OSAction *action TYPE (Cls::Method)") that
    * must be consumed as a unit or its tokens get mistaken for the parameter
    * name/type. */

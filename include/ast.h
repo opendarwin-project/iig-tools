@@ -87,7 +87,7 @@ struct File {
   std::string implText;
   std::string frameworkName; /* --framework-name; "" = include by quotes */
   /* "typedef char Foo[N];" declarations seen in this file, e.g.
-   * IODispatchQueueName[256] -- parameters of these types get bounded-string
+   * IODispatchQueueName[256], parameters of these types get bounded-string
    * marshaling (embedded fixed buffer + strlcpy/strnlen), not scalar copy. */
   std::map<std::string, int> charArrayTypedefs;
   std::map<std::string, ArrayTypedef> arrayTypedefs;

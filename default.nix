@@ -24,6 +24,6 @@ stdenv.mkDerivation rec {
 
   meta = with lib; {
     description = "IOKit interface generator (iig) for DriverKit .iig files, kernel-side subset";
-    platforms = platforms.linux;
+    platforms = platforms.linux ++ platforms.darwin;
   };
 }
