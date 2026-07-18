@@ -13,27 +13,31 @@
 
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 static bool
 readFile(const std::string &path, std::string &out)
 {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) return false;
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  out = ss.str();
-  return true;
+  FILE *f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  out.clear();
+  char buf[4096];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+    out.append(buf, n);
+  bool ok = !std::ferror(f);
+  std::fclose(f);
+  return ok;
 }
 
 static bool
 writeFile(const std::string &path, const std::string &data)
 {
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) return false;
-  out << data;
-  return out.good();
+  FILE *f = std::fopen(path.c_str(), "wb");
+  if (!f) return false;
+  bool ok = data.empty() ||
+      std::fwrite(data.data(), 1, data.size(), f) == data.size();
+  ok = std::fclose(f) == 0 && ok;
+  return ok;
 }
 
 int
